@@ -12,12 +12,13 @@
  * - Tap a seat to move the turn there
  * - End turn button moves to the next seat
  * - Add increment on turn changes
+ * - Show a configurable pre-countdown before the main remaining time starts
  * - When a player reaches 0, reset to a configurable zero-reset time and move to the next seat
  * - Optional setting: after a player has hit 0 once, end-turn returns them to the zero-reset time instead of adding increment
  * - Undo for the last board-changing action
  * - Reorder seats by drag and drop on desktop and touch devices
  * - Edit each player time directly in minutes and seconds
- * - Settings panel for base time, increment, zero-reset time, player count, and the zero-after-0 toggle
+ * - Settings panel for base time, increment, pre-countdown, zero-reset time, player count, and the zero-after-0 toggle
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -39,9 +40,11 @@ type TouchDragState = {
 type Snapshot = {
   baseMinutes: string;
   incrementSeconds: string;
+  preCountdownSeconds: string;
   zeroResetSeconds: string;
   playerCount: string;
   repeatZeroReset: boolean;
+  turnPrepRemaining: number;
   players: Player[];
   activePlayerId: string | null;
   running: boolean;
@@ -106,11 +109,39 @@ function useIsMobile() {
   return isMobile;
 }
 
+function runSanityChecks() {
+  const formatCases: Array<[number, string]> = [
+    [0, "0:00"],
+    [1, "0:01"],
+    [59, "0:59"],
+    [60, "1:00"],
+    [125, "2:05"],
+    [-3, "0:00"],
+  ];
+  for (const [input, expected] of formatCases) {
+    console.assert(formatTime(input) === expected, `formatTime(${input}) should be ${expected}`);
+  }
+
+  const parseCases: Array<[string, number | null]> = [
+    ["90", 90],
+    ["1:30", 90],
+    ["0:05", 5],
+    ["", null],
+    ["bad", null],
+  ];
+  for (const [input, expected] of parseCases) {
+    console.assert(parseTimeInput(input) === expected, `parseTimeInput(${JSON.stringify(input)}) should be ${String(expected)}`);
+  }
+
+  console.assert(moveItem([1, 2, 3], 0, 2).join(",") === "2,3,1", "moveItem should reorder items");
+}
+
 export default function FischerClockTimer() {
   const isMobile = useIsMobile();
   const [baseMinutes, setBaseMinutes] = useState<string>("10");
   const [incrementSeconds, setIncrementSeconds] = useState<string>("0");
   const [prevIncrementSeconds, setPrevIncrementSeconds] = useState<string>("0");
+  const [preCountdownSeconds, setPreCountdownSeconds] = useState<string>("3");
   const [zeroResetSeconds, setZeroResetSeconds] = useState<string>("10");
   const [playerCount, setPlayerCount] = useState<string>(String(DEFAULT_PLAYER_COUNT));
   const [repeatZeroReset, setRepeatZeroReset] = useState<boolean>(true);
@@ -118,6 +149,7 @@ export default function FischerClockTimer() {
   const [activePlayerId, setActivePlayerId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [pausedFromPlayerId, setPausedFromPlayerId] = useState<string | null>(null);
+  const [turnPrepRemaining, setTurnPrepRemainingState] = useState<number>(0);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -127,19 +159,34 @@ export default function FischerClockTimer() {
   const intervalRef = useRef<number | null>(null);
   const lastTickRef = useRef<number>(Date.now());
   const touchDragRef = useRef<TouchDragState | null>(null);
+  const turnPrepRemainingRef = useRef<number>(0);
+
+  const setTurnPrepRemaining = (value: number) => {
+    turnPrepRemainingRef.current = value;
+    setTurnPrepRemainingState(value);
+  };
 
   const baseSeconds = useMemo(() => {
     const value = Number(baseMinutes);
     return Math.max(0, Math.floor(Number.isNaN(value) ? 0 : value) * 60);
   }, [baseMinutes]);
+
   const zeroResetValue = useMemo(() => {
     const value = Number(zeroResetSeconds);
     return Math.max(0, Math.floor(Number.isNaN(value) ? 0 : value));
   }, [zeroResetSeconds]);
+
+  const preCountdownValue = useMemo(() => {
+    const value = Number(preCountdownSeconds);
+    return Math.max(0, Math.floor(Number.isNaN(value) ? 0 : value));
+  }, [preCountdownSeconds]);
+
   const incrementValue = useMemo(() => {
     const value = Number(incrementSeconds);
     return Math.max(0, Math.floor(Number.isNaN(value) ? 0 : value));
   }, [incrementSeconds]);
+
+  const effectiveIncrementValue = repeatZeroReset ? 0 : incrementValue;
 
   const activePlayer = useMemo(() => players.find((p) => p.id === activePlayerId) ?? null, [players, activePlayerId]);
   const activeIndex = useMemo(() => players.findIndex((p) => p.id === activePlayerId), [players, activePlayerId]);
@@ -147,9 +194,11 @@ export default function FischerClockTimer() {
   const snapshot = (): Snapshot => ({
     baseMinutes,
     incrementSeconds,
+    preCountdownSeconds,
     zeroResetSeconds,
     playerCount,
     repeatZeroReset,
+    turnPrepRemaining: turnPrepRemainingRef.current,
     players: players.map((p) => ({ ...p })),
     activePlayerId,
     running,
@@ -164,6 +213,7 @@ export default function FischerClockTimer() {
   const restoreSnapshot = (snap: Snapshot) => {
     setBaseMinutes(snap.baseMinutes);
     setIncrementSeconds(snap.incrementSeconds);
+    setPreCountdownSeconds(snap.preCountdownSeconds);
     setZeroResetSeconds(snap.zeroResetSeconds);
     setPlayerCount(snap.playerCount);
     setRepeatZeroReset(snap.repeatZeroReset);
@@ -174,6 +224,7 @@ export default function FischerClockTimer() {
     setDraftTimes({ ...snap.draftTimes });
     setDraggedId(null);
     setDropTargetId(null);
+    setTurnPrepRemaining(snap.turnPrepRemaining);
     touchDragRef.current = null;
   };
 
@@ -187,10 +238,34 @@ export default function FischerClockTimer() {
   };
 
   useEffect(() => {
+    runSanityChecks();
     return () => {
       if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
     };
   }, []);
+
+  const advanceAfterTimeout = (prev: Player[], currentIndex: number, current: Player) => {
+    const next = [...prev];
+    next[currentIndex] = {
+      ...current,
+      time: zeroResetValue,
+      hasZeroed: true,
+    };
+
+    if (repeatZeroReset && !current.hasZeroed) {
+      setActivePlayerId(current.id);
+      setPausedFromPlayerId(null);
+      setTurnPrepRemaining(0);
+      return next;
+    }
+
+    const nextIndexVal = (currentIndex + 1) % next.length;
+    const nextPlayer = next[nextIndexVal];
+    setActivePlayerId(nextPlayer?.id ?? null);
+    setPausedFromPlayerId(null);
+    setTurnPrepRemaining(preCountdownValue);
+    return next;
+  };
 
   useEffect(() => {
     if (!running || !activePlayerId) {
@@ -212,29 +287,31 @@ export default function FischerClockTimer() {
         if (index < 0) return prev;
 
         const current = prev[index];
-        const nextTime = current.time - elapsed;
         const next = [...prev];
 
-        if (nextTime <= 0) {
-          if (repeatZeroReset && !current.hasZeroed) {
-            next[index] = {
-              ...current,
-              time: zeroResetValue,
-              hasZeroed: true,
-            };
-            setActivePlayerId(current.id);
-            setPausedFromPlayerId(null);
-            lastTickRef.current = Date.now();
-            return next;
+        if (turnPrepRemainingRef.current > 0) {
+          const nextPrep = turnPrepRemainingRef.current - elapsed;
+          if (nextPrep > 0) {
+            setTurnPrepRemaining(nextPrep);
+            return prev;
           }
 
-          next[index] = { ...current, time: zeroResetValue, hasZeroed: true };
-          const nextIndexVal = (index + 1) % next.length;
-          const nextPlayer = next[nextIndexVal];
-          setActivePlayerId(nextPlayer?.id ?? null);
-          setPausedFromPlayerId(null);
-          lastTickRef.current = Date.now();
+          const overflow = -nextPrep;
+          setTurnPrepRemaining(0);
+          if (overflow <= 0) return prev;
+
+          const timeAfterPrep = current.time - overflow;
+          if (timeAfterPrep <= 0) {
+            return advanceAfterTimeout(prev, index, current);
+          }
+
+          next[index] = { ...current, time: timeAfterPrep };
           return next;
+        }
+
+        const nextTime = current.time - elapsed;
+        if (nextTime <= 0) {
+          return advanceAfterTimeout(prev, index, current);
         }
 
         next[index] = { ...current, time: nextTime };
@@ -248,7 +325,7 @@ export default function FischerClockTimer() {
         intervalRef.current = null;
       }
     };
-  }, [running, activePlayerId, zeroResetValue]);
+  }, [running, activePlayerId, repeatZeroReset, zeroResetValue, preCountdownValue]);
 
   const resetClock = () => {
     pushHistory();
@@ -259,6 +336,7 @@ export default function FischerClockTimer() {
     setPausedFromPlayerId(null);
     setDraggedId(null);
     setDropTargetId(null);
+    setTurnPrepRemaining(0);
     touchDragRef.current = null;
   };
 
@@ -288,13 +366,13 @@ export default function FischerClockTimer() {
       setActivePlayerId(null);
       setRunning(false);
       setPausedFromPlayerId(null);
+      setTurnPrepRemaining(0);
     }
   };
 
   const syncNamesAndTimes = () => {
     pushHistory();
 
-    // タイマー値と0到達フラグをリセット
     setPlayers((prev) =>
       prev.map((player) => ({
         ...player,
@@ -303,15 +381,11 @@ export default function FischerClockTimer() {
       }))
     );
 
-    // 下書きクリア
     setDraftTimes({});
-
-    // 手番状態リセット
     setActivePlayerId(null);
     setRunning(false);
     setPausedFromPlayerId(null);
-
-    // 設定タブを閉じる
+    setTurnPrepRemaining(0);
     setShowSettings(false);
   };
 
@@ -337,7 +411,7 @@ export default function FischerClockTimer() {
       const sourceIndex = next.findIndex((p) => p.id === incrementSourceId);
       if (sourceIndex >= 0) {
         const source = next[sourceIndex];
-        const nextTime = repeatZeroReset && source.hasZeroed ? zeroResetValue : source.time + incrementValue;
+        const nextTime = repeatZeroReset && source.hasZeroed ? zeroResetValue : source.time + effectiveIncrementValue;
         next[sourceIndex] = {
           ...source,
           time: nextTime,
@@ -349,6 +423,10 @@ export default function FischerClockTimer() {
     setActivePlayerId(targetPlayerId);
     setPausedFromPlayerId(null);
     setRunning(true);
+
+    const targetPlayer = players.find((p) => p.id === targetPlayerId);
+    const shouldSkipPrep = repeatZeroReset && targetPlayer?.hasZeroed;
+    setTurnPrepRemaining(shouldSkipPrep ? 0 : preCountdownValue);
     lastTickRef.current = Date.now();
   };
 
@@ -386,6 +464,7 @@ export default function FischerClockTimer() {
         setActivePlayerId(null);
         setRunning(false);
         setPausedFromPlayerId(null);
+        setTurnPrepRemaining(0);
       } else if (activePlayerId) {
         const activeIdx = prev.findIndex((p) => p.id === activePlayerId);
         if (activeIdx > index && next[activeIdx - 1]) {
@@ -417,11 +496,8 @@ export default function FischerClockTimer() {
 
   const startTouchDrag = (playerId: string, event: React.PointerEvent<HTMLDivElement>) => {
     if (!isMobile || event.pointerType === "mouse") return;
-
     const target = event.target as HTMLElement;
-
-    // ☰ハンドル以外はドラッグ開始しない
-    if (!target.closest(".drag-handle")) return;
+    if (target.closest("input, button, textarea, select, option")) return;
 
     touchDragRef.current = {
       pointerId: event.pointerId,
@@ -429,7 +505,6 @@ export default function FischerClockTimer() {
       startY: event.clientY,
       moved: false,
     };
-
     setDraggedId(playerId);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -481,7 +556,6 @@ export default function FischerClockTimer() {
     setPlayers((prev) =>
       prev.map((player) => {
         if (player.id !== playerId) return player;
-
         const shouldClearZeroed = repeatZeroReset && parsed > zeroResetValue;
         return {
           ...player,
@@ -508,7 +582,6 @@ export default function FischerClockTimer() {
   const styles = {
     page: {
       minHeight: "100dvh",
-      
       background: "#020617",
       color: "white",
       padding: outerPad,
@@ -701,6 +774,11 @@ export default function FischerClockTimer() {
       cursor: "pointer",
       fontSize: 13,
     },
+    subStatus: {
+      color: "#f59e0b",
+      fontSize: isMobile ? 11 : 12,
+      marginTop: 2,
+    },
   };
 
   return (
@@ -716,9 +794,12 @@ export default function FischerClockTimer() {
           <button type="button" style={styles.tinyButton} onClick={undo} disabled={history.length === 0}>
             ↩
           </button>
-          <span style={{ color: "#cbd5e1", fontSize: isMobile ? 12 : 14 }}>
-            手番中: <strong style={{ color: "white" }}>{activePlayer ? activePlayer.name : "未開始"}</strong>
-          </span>
+          <div>
+            <div style={{ color: "#cbd5e1", fontSize: isMobile ? 12 : 14 }}>
+              手番中: <strong style={{ color: "white" }}>{activePlayer ? activePlayer.name : "未開始"}</strong>
+            </div>
+            
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <button type="button" style={{ ...styles.turnButton, background: "rgba(239,68,68,0.35)" }} onClick={pause} disabled={!running || !activePlayerId}>
@@ -745,6 +826,10 @@ export default function FischerClockTimer() {
               <input type="number" min={0} value={incrementSeconds} onChange={(e) => setIncrementSeconds(e.target.value)} style={styles.input} />
             </label>
             <label style={styles.field}>
+              <span>ディレイ（秒）</span>
+              <input type="number" min={0} value={preCountdownSeconds} onChange={(e) => setPreCountdownSeconds(e.target.value)} style={styles.input} />
+            </label>
+            <label style={styles.field}>
               <span>0秒時リセット（秒）</span>
               <input type="number" min={0} value={zeroResetSeconds} onChange={(e) => setZeroResetSeconds(e.target.value)} style={styles.input} />
             </label>
@@ -764,15 +849,15 @@ export default function FischerClockTimer() {
                 type="checkbox"
                 checked={repeatZeroReset}
                 onChange={(e) => {
-                const checked = e.target.checked;
-                setRepeatZeroReset(checked);
-                if (checked) {
-                  setPrevIncrementSeconds(incrementSeconds);
-                  setIncrementSeconds("0");
-                } else {
-                  setIncrementSeconds(prevIncrementSeconds);
-                }
-              }}
+                  const checked = e.target.checked;
+                  setRepeatZeroReset(checked);
+                  if (checked) {
+                    setPrevIncrementSeconds(incrementSeconds);
+                    setIncrementSeconds("0");
+                  } else {
+                    setIncrementSeconds(prevIncrementSeconds);
+                  }
+                }}
               />
               <span>対局時計モードにする</span>
             </label>
@@ -782,11 +867,7 @@ export default function FischerClockTimer() {
                 <button type="button" style={styles.settingsButton} onClick={syncNamesAndTimes}>
                   新規対局
                 </button>
-                <button
-                  type="button"
-                  style={styles.settingsButton}
-                  onClick={() => setShowSettings(false)}
-                >
+                <button type="button" style={styles.settingsButton} onClick={() => setShowSettings(false)}>
                   閉じる
                 </button>
               </div>
@@ -805,6 +886,8 @@ export default function FischerClockTimer() {
             const [draftMin, draftSec] = (draft ?? "").split(":");
             const displayMin = draft !== undefined ? (draftMin ?? "") : String(Math.floor(player.time / 60));
             const displaySec = draft !== undefined ? (draftSec ?? "") : String(Math.floor(player.time % 60)).padStart(2, "0");
+            const showPrep = activePlayerId === player.id && turnPrepRemaining > 0;
+            const isZeroedStyle = repeatZeroReset && player.hasZeroed;
 
             return (
               <div
@@ -853,7 +936,14 @@ export default function FischerClockTimer() {
                   />
                 </div>
 
-                <div style={{ ...styles.time, color: (repeatZeroReset && player.hasZeroed) ? "#ef4444" : "white" }}>{formatTime(player.time)}</div>
+                <div
+                  style={{
+                    ...styles.time,
+                    color: showPrep ? "#f59e0b" : isZeroedStyle ? "#ef4444" : "white",
+                  }}
+                >
+                  {showPrep ? `${Math.ceil(turnPrepRemaining)}` : formatTime(player.time)}
+                </div>
 
                 <div style={styles.timeEditRow} onClick={(e) => e.stopPropagation()}>
                   <input
@@ -897,7 +987,7 @@ export default function FischerClockTimer() {
                 </div>
 
                 <div style={{ color: isActive ? "#86efac" : "#94a3b8", fontSize: isMobile ? 10 : 12, minHeight: 12 }}>
-                  {isActive ? "▶ 進行中" : draggedId === player.id ? "移動中" : ""}
+                  {isActive ? ("▶ 進行中") : draggedId === player.id ? "移動中" : ""}
                 </div>
               </div>
             );
