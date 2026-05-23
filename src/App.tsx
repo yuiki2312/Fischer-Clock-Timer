@@ -587,7 +587,9 @@ export default function FischerClockTimer() {
       gap: isMobile ? 4 : 7,
       boxShadow: "0 10px 20px rgba(0,0,0,0.18)",
       overflow: "hidden",
-      touchAction: "none",
+      // Allow pinch-zoom / panning over the card; only the drag handle below
+      // opts out of touch gestures so seat reordering still works.
+      touchAction: "manipulation",
       cursor: "pointer",
       justifyContent: "space-between",
       opacity: isTouchDragging ? 0.65 : 1,
@@ -873,7 +875,7 @@ export default function FischerClockTimer() {
                 </button>
 
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <span className="drag-handle" style={{ cursor: "grab", userSelect: "none", fontSize: isMobile ? 13 : 16 }} title="ドラッグして並び替え">
+                  <span className="drag-handle" style={{ cursor: "grab", userSelect: "none", touchAction: "none", fontSize: isMobile ? 13 : 16 }} title="ドラッグして並び替え">
                     ☰
                   </span>
                   <input
