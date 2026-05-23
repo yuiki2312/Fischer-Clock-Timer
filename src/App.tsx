@@ -12,7 +12,7 @@
  * - Tap a seat to move the turn there
  * - End turn button moves to the next seat
  * - Add increment on turn changes
- * - When a player reaches 0, reset to a configurable zero-reset time and move to the next seat
+ * - When a player reaches 0 with 対局時計モード on for the first time (not yet zeroed), they stay on their own seat and reset to the configurable zero-reset time (byo-yomi style); with the mode off, or on a later zero, the turn moves to the next seat
  * - Optional setting: after a player has hit 0 once, end-turn returns them to the zero-reset time instead of adding increment
  * - Undo for the last board-changing action
  * - Reorder seats by drag and drop on desktop and touch devices
@@ -94,7 +94,9 @@ function makePlayers(count: number, baseSeconds: number): Player[] {
 }
 
 function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(false);
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth < 768 : false
+  );
 
   useEffect(() => {
     const update = () => setIsMobile(window.innerWidth < 768);
@@ -248,7 +250,25 @@ export default function FischerClockTimer() {
         intervalRef.current = null;
       }
     };
-  }, [running, activePlayerId, zeroResetValue]);
+  }, [running, activePlayerId, zeroResetValue, repeatZeroReset]);
+
+  useEffect(() => {
+    const ids = new Set(players.map((p) => p.id));
+    setDraftTimes((prev) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [pid, v] of Object.entries(prev)) {
+        if (ids.has(pid)) next[pid] = v;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    if (activePlayerId && !ids.has(activePlayerId)) {
+      setActivePlayerId(null);
+      setRunning(false);
+      setPausedFromPlayerId(null);
+    }
+  }, [players, activePlayerId]);
 
   const resetClock = () => {
     pushHistory();
@@ -269,26 +289,13 @@ export default function FischerClockTimer() {
     setPlayerCount(nextCountRaw);
 
     setPlayers((prev) => {
+      if (prev.length === count) return prev;
       const next = prev.slice(0, count);
       while (next.length < count) {
         next.push({ id: createId(), name: `Seat${next.length + 1}`, time: baseSeconds, hasZeroed: false });
       }
       return next;
     });
-
-    setDraftTimes((prev) => {
-      const nextDraft: Record<string, string> = {};
-      for (const player of players.slice(0, count)) {
-        if (prev[player.id] !== undefined) nextDraft[player.id] = prev[player.id];
-      }
-      return nextDraft;
-    });
-
-    if (activePlayerId && !players.slice(0, count).some((p) => p.id === activePlayerId)) {
-      setActivePlayerId(null);
-      setRunning(false);
-      setPausedFromPlayerId(null);
-    }
   };
 
   const syncNamesAndTimes = () => {
@@ -375,33 +382,12 @@ export default function FischerClockTimer() {
   };
 
   const removePlayer = (id: string) => {
+    if (players.length <= MIN_PLAYERS) return;
+    if (!players.some((p) => p.id === id)) return;
     pushHistory();
-    setPlayers((prev) => {
-      if (prev.length <= MIN_PLAYERS) return prev;
-      const index = prev.findIndex((p) => p.id === id);
-      if (index < 0) return prev;
-      const next = prev.filter((p) => p.id !== id);
-
-      if (id === activePlayerId) {
-        setActivePlayerId(null);
-        setRunning(false);
-        setPausedFromPlayerId(null);
-      } else if (activePlayerId) {
-        const activeIdx = prev.findIndex((p) => p.id === activePlayerId);
-        if (activeIdx > index && next[activeIdx - 1]) {
-          setActivePlayerId(next[activeIdx - 1].id);
-        }
-      }
-
-      setPlayerCount(String(next.length));
-      return next;
-    });
-
-    setDraftTimes((prev) => {
-      const copy = { ...prev };
-      delete copy[id];
-      return copy;
-    });
+    const newLen = players.length - 1;
+    setPlayers((prev) => prev.filter((p) => p.id !== id));
+    setPlayerCount(String(newLen));
   };
 
   const reorderPlayers = (fromId: string, toId: string) => {
@@ -482,7 +468,7 @@ export default function FischerClockTimer() {
       prev.map((player) => {
         if (player.id !== playerId) return player;
 
-        const shouldClearZeroed = repeatZeroReset && parsed > zeroResetValue;
+        const shouldClearZeroed = parsed > 0;
         return {
           ...player,
           time: parsed,
